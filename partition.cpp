@@ -155,6 +155,7 @@ TWPartition::TWPartition(const string& fstab_line) {
 	Crypto_Key_Location = "footer";
 	MTP_Storage_ID = 0;
 	Can_Flash_Img = false;
+	Mount_Read_Only = false;
 	Is_ImageMount = false;
 	Size_Raw = 0;
 
@@ -282,6 +283,7 @@ bool TWPartition::Process_Fstab_Line(string Line, bool Display_Error) {
 			Storage_Name = Display_Name;
 			Wipe_Available_in_GUI = true;
 			Can_Be_Backed_Up = true;
+			Mount_Read_Only = true;
 		} else if (Mount_Point == "/data") {
 			UnMount(false); // added in case /data is mounted as tmpfs for qcom hardware decrypt
 			Display_Name = "Data";
@@ -414,6 +416,11 @@ bool TWPartition::Process_Fstab_Line(string Line, bool Display_Error) {
 			Display_Name = "Recovery";
 			Backup_Display_Name = Display_Name;
 			Can_Flash_Img = true;
+		} else if (Mount_Point == "/system_image") {
+			Display_Name = "System Image";
+			Backup_Display_Name = Display_Name;
+			Can_Flash_Img = false;
+			Can_Be_Backed_Up = true;
 		}
 	}
 
@@ -970,6 +977,7 @@ bool TWPartition::Is_Mounted(void) {
 
 bool TWPartition::Mount(bool Display_Error) {
 	int mounted = 0;
+	unsigned long flags = Mount_Flags;
 
 	if (Is_Mounted()) {
 		return true;
@@ -1043,9 +1051,15 @@ bool TWPartition::Mount(bool Display_Error) {
 #endif
 		}
 	}
+
+	if (Mount_Read_Only)
+		flags |= MS_RDONLY;
+
 	if (Fstab_File_System == "yaffs2" && !mounted) {
 		// mount an MTD partition as a YAFFS2 filesystem.
-		const unsigned long flags = MS_NOATIME | MS_NODEV | MS_NODIRATIME;
+		flags = MS_NOATIME | MS_NODEV | MS_NODIRATIME;
+		if (Mount_Read_Only)
+			flags |= MS_RDONLY;
 		if (mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), Fstab_File_System.c_str(), flags, NULL) < 0) {
 			if (mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), Fstab_File_System.c_str(), flags | MS_RDONLY, NULL) < 0) {
 				if (Display_Error)
@@ -1087,8 +1101,8 @@ bool TWPartition::Mount(bool Display_Error) {
 		mount_fs = "texfat";
 
 	if (!mounted &&
-		mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), Mount_Flags, Mount_Options.c_str()) != 0 &&
-		mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), Mount_Flags, NULL) != 0) {
+		mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), flags, Mount_Options.c_str()) != 0 &&
+		mount(Actual_Block_Device.c_str(), Mount_Point.c_str(), mount_fs.c_str(), flags, NULL) != 0) {
 #ifdef TW_NO_EXFAT_FUSE
 		if (Current_File_System == "exfat") {
 			LOGINFO("Mounting exfat failed, trying vfat...\n");
@@ -1097,7 +1111,7 @@ bool TWPartition::Mount(bool Display_Error) {
 					LOGERR("Unable to mount '%s'\n", Mount_Point.c_str());
 				else
 					LOGINFO("Unable to mount '%s'\n", Mount_Point.c_str());
-				LOGINFO("Actual block device: '%s', current file system: '%s', flags: 0x%8x, options: '%s'\n", Actual_Block_Device.c_str(), Current_File_System.c_str(), Mount_Flags, mnt_opts.c_str());
+				LOGINFO("Actual block device: '%s', current file system: '%s', flags: 0x%8x, options: '%s'\n", Actual_Block_Device.c_str(), Current_File_System.c_str(), flags, Mount_Options.c_str());
 				return false;
 			}
 		} else {
@@ -2258,4 +2272,38 @@ bool TWPartition::Flash_Image_FI(string Filename) {
 	LOGINFO("Flash command: '%s'\n", Command.c_str());
 	TWFunc::Exec_Cmd(Command);
 	return true;
+}
+
+void TWPartition::Change_Mount_Read_Only(bool new_value) {
+	Mount_Read_Only = new_value;
+}
+
+int TWPartition::Check_Lifetime_Writes() {
+	bool original_read_only = Mount_Read_Only;
+	int ret = 1;
+
+	Mount_Read_Only = true;
+	if (Mount(false)) {
+		Find_Actual_Block_Device();
+		string block = basename(Actual_Block_Device.c_str());
+		string file = "/sys/fs/" + Current_File_System + "/" + block + "/lifetime_write_kbytes";
+		string result;
+		if (TWFunc::Path_Exists(file)) {
+			if (TWFunc::read_file(file, result) != 0) {
+				LOGINFO("Check_Lifetime_Writes of '%s' failed to read_file\n", file.c_str());
+			} else {
+				LOGINFO("Check_Lifetime_Writes result: '%s'\n", result.c_str());
+				if (result == "0") {
+					ret = 0;
+				}
+			}
+		} else {
+			LOGINFO("Check_Lifetime_Writes file does not exist '%s'\n", file.c_str());
+		}
+		UnMount(true);
+	} else {
+		LOGINFO("Check_Lifetime_Writes failed to mount '%s'\n", Mount_Point.c_str());
+	}
+	Mount_Read_Only = original_read_only;
+	return ret;
 }
